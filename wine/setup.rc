@@ -1,0 +1,4 @@
+// SpokenPlayersVoicepack-Wine.exe's resources: the voicepack's icon, and sapifix.dll (built first,
+// into out\wine\), which it installs.
+1 ICON "../installer/art/icon.ico"
+SAPIFIX RCDATA "../out/wine/sapifix.dll"

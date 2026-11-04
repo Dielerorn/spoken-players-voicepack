@@ -19,6 +19,7 @@ speaks with small neural voice models, one per race and body type, each with sev
 | `installer/` | the Inno Setup script (`SpokenPlayersVoicepack.iss`), its name (`common.iss`) and pictures |
 | `tools/Build-Installer.ps1` | builds the setup into `out/`, the models downloaded from Hugging Face |
 | `tools/voice-info.sh` | writes `voices-info` from a folder of model packs |
+| `wine/` | for WoW on Linux: SapiFix (`sapifix.c`), the setup that installs the voicepack and it in a Wine prefix (`setup.c`), `install.sh` that finds the prefix ([wine/README.md](wine/README.md)) |
 
 ## The engine
 
@@ -129,3 +130,33 @@ the game:
   not respond and, past about 29 s, voice chat fails to connect. It happens with any voices, also
   Microsoft's own. So the voicepack installs 48 voices, not one per speaker (300 and more), and the
   addon picks a speaker with the speaker code.
+
+## Under Wine (Linux)
+
+The engine works under Wine and Proton as it is, and WoW finds its signature good there. WoW's speech
+does not: Wine's SAPI (Wine 10 and 11, every Proton) lacks what WoW uses, so WoW says nothing with
+any voice, Proton's own too. Seen with the engine's log and Wine's own (no change to the game):
+
+- **SAPI XML.** WoW's `Speak` has `<bookmark mark='Start'/>…<bookmark mark='End'/>` around the text,
+  and the addon's `<pitch middle>` and `<rate speed>` in it; Wine parses SSML only
+  (`SPERR_UNSUPPORTED_FORMAT`, or `E_NOTIMPL` asked for SAPI XML).
+- **The WAV.** WoW writes each line to `VoiceSpeak_Utterance_….wav` through
+  `ISpStream::BindToFile`, a stub in Wine. Were it there: a format other than the voice's is
+  converted with Media Foundation's resampler, which Proton lacks (nothing is written).
+- **Events.** `SetInterest`, `GetEvents` and every notification are stubs.
+- **The certificate.** The setup trusts it with `certutil`, a stub too (WoW loads the engine all the
+  same: Wine's `WinVerifyTrust` passes it).
+
+SapiFix (`wine/sapifix.c`) is registered as the *TreatAs* class of SpVoice and SpStream, so WoW's
+`CoCreateInstance` gets it. Its voice wraps Wine's own: `Speak` turns the SAPI XML into runs of
+SSML that Wine parses into the same `RateAdj`, `PitchAdj.MiddleAdj` and `Volume` (rate
+`3^(r/10)`, pitch `(2^(p/24) − 1) × 100 %`, so the engine sees each character's exactly), with the
+bookmarks between them; it raises the stream's start, its bookmarks and its end itself, through
+a sink, a window message, a callback or a Win32 event. Its stream is a whole SpStream: `BindToFile`
+writes a WAV (its header kept up to date), and, as an `ISpAudio` too, it takes the engine's format
+from Wine's voice and converts it to the file's (PCM of 8 or 16 bits or float, mono or stereo, any
+rate). Wine registers its SAPI again whenever Proton updates a prefix; a TreatAs key stays.
+
+`SpokenPlayersVoicepack-Wine.exe` (`wine/setup.c`) runs this setup in the prefix, trusts the
+certificate, installs SapiFix, and says a line as WoW does and plays it. `wine/install.sh` finds
+WoW's prefix and runs it there with the prefix's own Proton (named in `config_info`) or Wine.

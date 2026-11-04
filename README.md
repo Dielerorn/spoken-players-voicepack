@@ -52,6 +52,12 @@ Forever or both) and installs that game's voices, replacing any installed voicep
 To try one voice without installing anything: `engine\tools\Test-Voice.ps1 -Voice orc_male`
 (registers it for your user only and writes WAV files; `-Cleanup` removes it).
 
+## Linux (Wine, Proton)
+
+WoW run through Wine or Proton speaks with the same voicepack, installed in its Wine prefix, with
+SapiFix for what Wine's speech API lacks: [wine/README.md](wine/README.md). `wine/build.sh` builds
+`SpokenPlayersVoicepack-Wine.exe`, which sets it all up there, and the zip to hand out.
+
 ## License
 
 GPL-3.0-or-later ([LICENSE](LICENSE)), as espeak-ng, which is built into the engine. The other
