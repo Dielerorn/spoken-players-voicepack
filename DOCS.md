@@ -134,8 +134,16 @@ the game:
 ## Under Wine (Linux)
 
 The engine works under Wine and Proton as it is, and WoW finds its signature good there. WoW's speech
-does not: Wine's SAPI (Wine 10 and 11, every Proton) lacks what WoW uses, so WoW says nothing with
-any voice, Proton's own too. Seen with the engine's log and Wine's own (no change to the game):
+does not, as it is. Seen with the engine's log, Wine's own and the files WoW opens (no change to the
+game):
+
+- **WoW's own voices.** Under Wine, WoW does not use SAPI at all: it speaks with Vivox's two voices
+  ("en_US male", "en_US female", Flite, in `WowVoiceProxy.exe`), unless the setting
+  `winePlatformTTS` is on ("Use Windows TTS on Wine. Disabled by default as it can cause crashes").
+  On, it uses SAPI as on Windows, and meets what follows.
+
+Wine's SAPI (Wine 10 and 11, every Proton) lacks what WoW uses, so with it WoW says nothing with any
+voice, Proton's own too:
 
 - **SAPI XML.** WoW's `Speak` has `<bookmark mark='Start'/>…<bookmark mark='End'/>` around the text,
   and the addon's `<pitch middle>` and `<rate speed>` in it; Wine parses SSML only
@@ -146,9 +154,15 @@ any voice, Proton's own too. Seen with the engine's log and Wine's own (no chang
 - **Events.** `SetInterest`, `GetEvents` and every notification are stubs.
 - **The certificate.** The setup trusts it with `certutil`, a stub too (WoW loads the engine all the
   same: Wine's `WinVerifyTrust` passes it).
+- **DXCore.** ONNX Runtime looks for GPUs through DXCore as the engine loads a model. Wine's DXCore is
+  built on wined3d, which opens an OpenGL context for it; in WoW's process that fails (the NVIDIA
+  driver refuses the GPU channel), and Wine's OpenGL asserts and stops WoW at its first line.
 
 SapiFix (`wine/sapifix.c`) is registered as the *TreatAs* class of SpVoice and SpStream, so WoW's
-`CoCreateInstance` gets it. Its voice wraps Wine's own: `Speak` turns the SAPI XML into runs of
+`CoCreateInstance` gets it. It is signed, as the engine is, with a certificate `wine/sign.py` makes
+for each build (its private key never saved), which the Wine setup trusts. Its voice wraps Wine's own
+(sapi.dll loaded from where SpVoice's class says it is, `system32\Speech\Common`: WoW's process does
+not find it by its name): `Speak` turns the SAPI XML into runs of
 SSML that Wine parses into the same `RateAdj`, `PitchAdj.MiddleAdj` and `Volume` (rate
 `3^(r/10)`, pitch `(2^(p/24) − 1) × 100 %`, so the engine sees each character's exactly), with the
 bookmarks between them; it raises the stream's start, its bookmarks and its end itself, through
@@ -158,5 +172,7 @@ from Wine's voice and converts it to the file's (PCM of 8 or 16 bits or float, m
 rate). Wine registers its SAPI again whenever Proton updates a prefix; a TreatAs key stays.
 
 `SpokenPlayersVoicepack-Wine.exe` (`wine/setup.c`) runs this setup in the prefix, trusts the
-certificate, installs SapiFix, and says a line as WoW does and plays it. `wine/install.sh` finds
+certificates, installs SapiFix, sets WoW up (`winePlatformTTS` on in each game folder's
+`WTF\Config.wtf`, and Wine's DXCore off for `Wow.exe`, `WowT.exe` and `WowB.exe`: the engine speaks on
+the CPU), and says a line as WoW does and plays it. `wine/install.sh` finds
 WoW's prefix and runs it there with the prefix's own Proton (named in `config_info`) or Wine.

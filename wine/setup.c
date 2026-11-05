@@ -7,7 +7,9 @@
  *     player chooses the game and the voices are downloaded.
  *  2. The engine's certificate trusted, which that setup does with certutil, a stub in Wine.
  *  3. SapiFix (sapifix.dll, carried in this file) installed and registered: WoW's speech needs what
- *     it adds to Wine's SAPI (sapifix.c).
+ *     it adds to Wine's SAPI (sapifix.c). Its certificate (carried too) trusted first: it is
+ *     signed as the engine is. Then WoW told to speak with Windows' voices, which under Wine it
+ *     does not by itself, and kept from what crashes it (set_up_wow).
  *  4. A line said the way WoW says it (a bookmarked line, into a WAV, followed by its events), then
  *     played, so the player hears that it works.
  *
@@ -263,17 +265,67 @@ static BOOL find_voicepack(WCHAR *dir, size_t dir_size, WCHAR *voice, size_t voi
     return found;
 }
 
-/* ---- 2. the engine's certificate ------------------------------------------------------------ */
+/* ---- 2. the certificates -------------------------------------------------------------------- */
 
-/* Trusted as certutil -addstore trusts it (Root and TrustedPublisher of the machine): a store keeps
- * a certificate as a "Blob" of properties, its SHA-1 (property 3) and itself (property 32), each
- * {id, 1, size} and its bytes. */
+static const WCHAR *trust_stores[] = { L"Root", L"TrustedPublisher" };
+
+/* Trusts a certificate as certutil -addstore does (Root and TrustedPublisher of the machine): a
+ * store keeps a certificate as a "Blob" of properties, its SHA-1 (property 3) and itself (property
+ * 32), each {id, 1, size} and its bytes. `thumbprint` gets its SHA-1 in hex. */
+static BOOL trust_der(const BYTE *der, DWORD size, WCHAR *thumbprint)
+{
+    WCHAR key_path[256];
+    BYTE sha1[20], *blob;
+    DWORD hash_size = sizeof(sha1), blob_size = 12 + sizeof(sha1) + 12 + size, i, header[3];
+    BOOL ok = TRUE;
+
+    if (!CryptHashCertificate(0, CALG_SHA1, 0, der, size, sha1, &hash_size) || !(blob = malloc(blob_size)))
+        return FALSE;
+    header[0] = 3; header[1] = 1; header[2] = sizeof(sha1);
+    memcpy(blob, header, 12);
+    memcpy(blob + 12, sha1, sizeof(sha1));
+    header[0] = 0x20; header[2] = size;
+    memcpy(blob + 12 + sizeof(sha1), header, 12);
+    memcpy(blob + 24 + sizeof(sha1), der, size);
+    for (i = 0; i < sizeof(sha1); i++) swprintf(thumbprint + i * 2, 3, L"%02X", sha1[i]);
+
+    for (i = 0; i < ARRAY_SIZE(trust_stores); i++)
+    {
+        HKEY key;
+
+        swprintf(key_path, ARRAY_SIZE(key_path), L"Software\\Microsoft\\SystemCertificates\\%ls\\Certificates\\%ls",
+                 trust_stores[i], thumbprint);
+        if (RegCreateKeyExW(HKEY_LOCAL_MACHINE, key_path, 0, NULL, 0, KEY_WRITE | KEY_WOW64_64KEY, NULL, &key, NULL))
+        {
+            ok = FALSE;
+            continue;
+        }
+        if (RegSetValueExW(key, L"Blob", 0, REG_BINARY, blob, blob_size)) ok = FALSE;
+        RegCloseKey(key);
+    }
+    free(blob);
+    return ok;
+}
+
+static void untrust(const WCHAR *thumbprint)
+{
+    WCHAR key_path[256];
+    DWORD i;
+
+    for (i = 0; i < ARRAY_SIZE(trust_stores); i++)
+    {
+        swprintf(key_path, ARRAY_SIZE(key_path), L"Software\\Microsoft\\SystemCertificates\\%ls\\Certificates\\%ls",
+                 trust_stores[i], thumbprint);
+        RegDeleteKeyExW(HKEY_LOCAL_MACHINE, key_path, KEY_WOW64_64KEY, 0);
+    }
+}
+
+/* The engine's, beside it, which the voicepack's setup trusts with certutil, a stub in Wine. */
 static BOOL trust_certificate(const WCHAR *dir)
 {
-    static const WCHAR *stores[] = { L"Root", L"TrustedPublisher" };
-    WCHAR path[MAX_PATH], key_path[256], thumbprint[41];
-    BYTE sha1[20], *der = NULL, *blob = NULL;
-    DWORD size, read, hash_size = sizeof(sha1), blob_size, i, header[3];
+    WCHAR path[MAX_PATH], thumbprint[41];
+    BYTE *der = NULL;
+    DWORD size, read;
     HANDLE file;
     BOOL ok = FALSE;
 
@@ -285,43 +337,62 @@ static BOOL trust_certificate(const WCHAR *dir)
         return FALSE;
     }
     size = GetFileSize(file, NULL);
-    if (size && size < 65536 && (der = malloc(size)) && ReadFile(file, der, size, &read, NULL) && read == size &&
-        CryptHashCertificate(0, CALG_SHA1, 0, der, size, sha1, &hash_size) &&
-        (blob = malloc(blob_size = 12 + sizeof(sha1) + 12 + size)))
-    {
-        header[0] = 3; header[1] = 1; header[2] = sizeof(sha1);
-        memcpy(blob, header, 12);
-        memcpy(blob + 12, sha1, sizeof(sha1));
-        header[0] = 0x20; header[2] = size;
-        memcpy(blob + 12 + sizeof(sha1), header, 12);
-        memcpy(blob + 24 + sizeof(sha1), der, size);
-        for (i = 0; i < sizeof(sha1); i++) swprintf(thumbprint + i * 2, 3, L"%02X", sha1[i]);
-
-        ok = TRUE;
-        for (i = 0; i < ARRAY_SIZE(stores); i++)
-        {
-            HKEY key;
-
-            swprintf(key_path, ARRAY_SIZE(key_path), L"Software\\Microsoft\\SystemCertificates\\%ls\\Certificates\\%ls",
-                     stores[i], thumbprint);
-            if (RegCreateKeyExW(HKEY_LOCAL_MACHINE, key_path, 0, NULL, 0, KEY_WRITE | KEY_WOW64_64KEY, NULL, &key, NULL))
-            {
-                ok = FALSE;
-                continue;
-            }
-            if (RegSetValueExW(key, L"Blob", 0, REG_BINARY, blob, blob_size)) ok = FALSE;
-            RegCloseKey(key);
-        }
-        if (ok) say(L"The engine's certificate is trusted (%ls).", thumbprint);
-    }
-    if (!ok) say(L"Could not trust the engine's certificate (%ls).", path);
+    if (size && size < 65536 && (der = malloc(size)) && ReadFile(file, der, size, &read, NULL) && read == size)
+        ok = trust_der(der, size, thumbprint);
+    if (ok) say(L"The engine's certificate is trusted (%ls).", thumbprint);
+    else say(L"Could not trust the engine's certificate (%ls).", path);
     CloseHandle(file);
     free(der);
-    free(blob);
     return ok;
 }
 
 /* ---- 3. SapiFix --------------------------------------------------------------------------- */
+
+#define SAPIFIX_KEY L"Software\\SapiFix"
+
+/* Its certificate, carried in this file: SapiFix is signed as the engine is (WoW loads no SAPI
+ * engine whose signature it does not trust: DOCS.md, Signing), by build.sh, with a certificate made
+ * for each build. The one trusted is noted under SAPIFIX_KEY, so the next build's replaces it and
+ * uninstalling takes it out. */
+static BOOL trust_sapifix(void)
+{
+    HRSRC resource = FindResourceW(NULL, L"SAPIFIXCER", (LPCWSTR)RT_RCDATA);
+    WCHAR thumbprint[41], before[41];
+    DWORD bytes = sizeof(before);
+    const BYTE *der;
+    HKEY key;
+
+    if (!resource || !(der = LockResource(LoadResource(NULL, resource))))
+    {
+        say(L"This file carries no certificate for SapiFix: build it with wine/build.sh.");
+        return FALSE;
+    }
+    if (!trust_der(der, SizeofResource(NULL, resource), thumbprint))
+    {
+        say(L"Could not trust SapiFix's certificate.");
+        return FALSE;
+    }
+    if (!RegGetValueW(HKEY_LOCAL_MACHINE, SAPIFIX_KEY, L"Certificate", RRF_RT_REG_SZ, NULL, before, &bytes) &&
+        wcscmp(before, thumbprint))
+        untrust(before);
+    if (!RegCreateKeyExW(HKEY_LOCAL_MACHINE, SAPIFIX_KEY, 0, NULL, 0, KEY_WRITE | KEY_WOW64_64KEY, NULL, &key, NULL))
+    {
+        RegSetValueExW(key, L"Certificate", 0, REG_SZ, (const BYTE *)thumbprint, (wcslen(thumbprint) + 1) * sizeof(WCHAR));
+        RegCloseKey(key);
+    }
+    say(L"SapiFix's certificate is trusted (%ls).", thumbprint);
+    return TRUE;
+}
+
+static void untrust_sapifix(void)
+{
+    WCHAR thumbprint[41];
+    DWORD bytes = sizeof(thumbprint);
+
+    if (!RegGetValueW(HKEY_LOCAL_MACHINE, SAPIFIX_KEY, L"Certificate", RRF_RT_REG_SZ, NULL, thumbprint, &bytes))
+        untrust(thumbprint);
+    RegDeleteKeyExW(HKEY_LOCAL_MACHINE, SAPIFIX_KEY, KEY_WOW64_64KEY, 0);
+}
 
 static void sapifix_path(WCHAR *dir, WCHAR *dll)
 {
@@ -366,6 +437,7 @@ static BOOL install_sapifix(void)
         return FALSE;
     }
     size = SizeofResource(NULL, resource);
+    if (!trust_sapifix()) return FALSE;
     sapifix_path(dir, dll);
     CreateDirectoryW(dir, NULL);
 
@@ -417,8 +489,153 @@ static BOOL uninstall_sapifix(void)
     if (module) FreeLibrary(module);
     DeleteFileW(dll);
     RemoveDirectoryW(dir);
+    untrust_sapifix();
     say(L"SapiFix is out: %ls", dir);
     return TRUE;
+}
+
+/* What WoW needs, in each of its game folders whose game is Wow.exe, WowT.exe or WowB.exe (retail,
+ * its test realms and betas, WoW Forever; not WowClassic*.exe):
+ *  - winePlatformTTS in WTF\Config.wtf: under Wine, WoW speaks with two voices of its own (Vivox's
+ *    "en_US male" and "en_US female") instead of Windows', unless it is set ("Use Windows TTS on
+ *    Wine. Disabled by default as it can cause crashes": Wine's SAPI lacks what WoW uses).
+ *  - dxcore.dll off for the game (Wine's AppDefaults): the engine's ONNX Runtime looks for GPUs
+ *    through DXCore as it loads a model, and Wine's DXCore is built on wined3d, which opens an
+ *    OpenGL context; in WoW's process that fails, and Wine aborts the game. The engine speaks on
+ *    the CPU: without DXCore it loads quicker. */
+static const WCHAR *wow_games[] = { L"Wow.exe", L"WowT.exe", L"WowB.exe" };
+
+static void set_platform_tts(const WCHAR *folder, BOOL on)
+{
+    static const char line[] = "SET winePlatformTTS \"1\"\r\n";
+    WCHAR path[MAX_PATH], fresh[MAX_PATH];
+    char *text = NULL, *out, *p, *next;
+    DWORD size = 0, read = 0, written;
+    HANDLE file;
+
+    swprintf(path, MAX_PATH, L"%ls\\WTF", folder);
+    if (on) CreateDirectoryW(path, NULL);
+    wcscat(path, L"\\Config.wtf");
+    file = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL);
+    if (file != INVALID_HANDLE_VALUE)
+    {
+        size = GetFileSize(file, NULL);
+        if (size < (1 << 20) && (text = malloc(size + 1)) && ReadFile(file, text, size, &read, NULL)) text[read] = 0;
+        CloseHandle(file);
+        if (!text || read != size) { free(text); return; }
+    }
+    else if (!on) return;
+    if (!(out = malloc(size + 2 + sizeof(line)))) { free(text); return; }
+
+    /* Every line but this setting's, then it, on. */
+    out[0] = 0;
+    for (p = text; p && *p; p = next)
+    {
+        size_t len = (next = strchr(p, '\n')) ? (size_t)(++next - p) : strlen(p);
+        if (!next) next = p + len;
+        if (len < 20 || _strnicmp(p, "SET winePlatformTTS ", 20)) strncat(out, p, len);
+    }
+    if (on)
+    {
+        if (out[0] && out[strlen(out) - 1] != '\n') strcat(out, "\r\n");
+        strcat(out, line);
+    }
+
+    swprintf(fresh, MAX_PATH, L"%ls.new", path);
+    file = CreateFileW(fresh, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (file != INVALID_HANDLE_VALUE && WriteFile(file, out, strlen(out), &written, NULL) && written == strlen(out))
+    {
+        CloseHandle(file);
+        if (MoveFileExW(fresh, path, MOVEFILE_REPLACE_EXISTING))
+            say(on ? L"WoW speaks with Windows' voices: %ls" : L"WoW speaks with its own voices again: %ls", path);
+    }
+    else if (file != INVALID_HANDLE_VALUE) CloseHandle(file);
+    DeleteFileW(fresh);
+    free(text);
+    free(out);
+}
+
+static void set_dxcore_off(const WCHAR *game, BOOL off)
+{
+    WCHAR key_path[128];
+    HKEY key;
+
+    swprintf(key_path, ARRAY_SIZE(key_path), L"Software\\Wine\\AppDefaults\\%ls\\DllOverrides", game);
+    if (!off)
+    {
+        RegDeleteKeyValueW(HKEY_CURRENT_USER, key_path, L"dxcore");
+        return;
+    }
+    if (RegCreateKeyExW(HKEY_CURRENT_USER, key_path, 0, NULL, 0, KEY_WRITE, NULL, &key, NULL)) return;
+    RegSetValueExW(key, L"dxcore", 0, REG_SZ, (const BYTE *)L"", sizeof(WCHAR));
+    RegCloseKey(key);
+}
+
+/* The folders WoW's game folders are in: where Battle.net says it put them, and the usual one. */
+static int wow_roots(WCHAR roots[][MAX_PATH], int max)
+{
+    WCHAR name[128], path[MAX_PATH], *tail;
+    HKEY key;
+    DWORD i, len, bytes;
+    int count = 0, j;
+
+    if (GetEnvironmentVariableW(L"ProgramFiles(x86)", path, MAX_PATH - 20))
+    {
+        wcscat(path, L"\\World of Warcraft");
+        wcscpy(roots[count++], path);
+    }
+    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"Software\\Blizzard Entertainment\\World of Warcraft", 0,
+                      KEY_READ | KEY_WOW64_32KEY, &key))
+        return count;
+    for (i = 0; count < max; i++)
+    {
+        /* the key's own InstallPath first, then its subkeys' (Beta, PTR, ...) */
+        if (i) { len = ARRAY_SIZE(name); if (RegEnumKeyExW(key, i - 1, name, &len, NULL, NULL, NULL, NULL)) break; }
+        bytes = sizeof(path);
+        if (RegGetValueW(key, i ? name : NULL, L"InstallPath", RRF_RT_REG_SZ, NULL, path, &bytes)) continue;
+        while ((tail = wcsrchr(path, '\\')) && !tail[1]) *tail = 0;  /* the game folder: its parent */
+        if (!(tail = wcsrchr(path, '\\'))) continue;
+        *tail = 0;
+        for (j = 0; j < count && _wcsicmp(roots[j], path); j++) ;
+        if (j == count) wcscpy(roots[count++], path);
+    }
+    RegCloseKey(key);
+    return count;
+}
+
+/* Sets WoW up (`on`) or back as it was, in every game folder found; how many. */
+static int set_up_wow(BOOL on)
+{
+    WCHAR roots[8][MAX_PATH], pattern[MAX_PATH], folder[MAX_PATH], exe[MAX_PATH];
+    WIN32_FIND_DATAW found;
+    HANDLE find;
+    int count = wow_roots(roots, ARRAY_SIZE(roots)), done = 0, r;
+    DWORD g;
+
+    for (r = 0; r < count; r++)
+    {
+        swprintf(pattern, MAX_PATH, L"%ls\\_*_", roots[r]);
+        if ((find = FindFirstFileW(pattern, &found)) == INVALID_HANDLE_VALUE) continue;
+        do
+        {
+            BOOL game = FALSE;
+
+            if (!(found.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) continue;
+            swprintf(folder, MAX_PATH, L"%ls\\%ls", roots[r], found.cFileName);
+            for (g = 0; g < ARRAY_SIZE(wow_games); g++)
+            {
+                swprintf(exe, MAX_PATH, L"%ls\\%ls", folder, wow_games[g]);
+                if (GetFileAttributesW(exe) == INVALID_FILE_ATTRIBUTES) continue;
+                set_dxcore_off(wow_games[g], on);
+                game = TRUE;
+            }
+            if (!game) continue;
+            set_platform_tts(folder, on);
+            done++;
+        } while (FindNextFileW(find, &found));
+        FindClose(find);
+    }
+    return done;
 }
 
 /* ---- 4. a line said as WoW says it ------------------------------------------------------------ */
@@ -593,9 +810,10 @@ int wmain(int argc, WCHAR **argv)
 
     if (uninstall)
     {
-        if (ask(MB_ICONQUESTION | MB_YESNO, L"Take SapiFix out of this Wine prefix? WoW's text to speech goes silent "
+        if (ask(MB_ICONQUESTION | MB_YESNO, L"Take SapiFix out of this Wine prefix? WoW speaks with its own two voices "
                 L"again.\n\nThe voicepack stays: its own uninstaller is in its folder (unins000.exe).") != IDYES)
             return 2;
+        set_up_wow(FALSE);
         return uninstall_sapifix() ? 0 : 1;
     }
     if (only_test) return test(!quiet);
@@ -643,5 +861,7 @@ int wmain(int argc, WCHAR **argv)
         ask(MB_ICONERROR | MB_OK, L"SapiFix could not be installed: close World of Warcraft and run this again.");
         return 1;
     }
+    if (!set_up_wow(TRUE))
+        say(L"Found no World of Warcraft folder to set up. In WoW, type /console winePlatformTTS 1 once, then restart it.");
     return test(!quiet);
 }

@@ -1467,6 +1467,32 @@ static const ISpVoiceVtbl voice_vtbl =
     voice_DisplayUI,
 };
 
+/* Wine's sapi.dll, from where SpVoice's class says it is (Wine puts it in system32\Speech\Common,
+ * as Windows does): not on the DLL search path, and WoW's process does not find it by its name. */
+static HMODULE load_wine_sapi(void)
+{
+    WCHAR path[MAX_PATH];
+    DWORD size = sizeof(path);
+    HMODULE sapi = NULL;
+    char text[MAX_PATH * 3];
+
+    if (!RegGetValueW(HKEY_CLASSES_ROOT, L"CLSID\\{96749377-3391-11D2-9EE3-00C04F797396}\\InprocServer32", NULL,
+                      RRF_RT_REG_SZ | RRF_RT_REG_EXPAND_SZ, NULL, path, &size) && !wcsstr(path, L"sapifix"))
+        sapi = LoadLibraryExW(path, NULL, 0);
+    if (!sapi && GetSystemDirectoryW(path, MAX_PATH - 24))
+    {
+        wcscat(path, L"\\Speech\\Common\\sapi.dll");
+        sapi = LoadLibraryExW(path, NULL, 0);
+    }
+    if (!sapi) sapi = LoadLibraryW(L"sapi.dll");
+    if (!sapi)
+    {
+        DWORD error = GetLastError();
+        log_line("could not load Wine's sapi.dll (%s): error %lu", utf8(path, text, sizeof(text), MAX_PATH), error);
+    }
+    return sapi;
+}
+
 /* Wine's own SpVoice, from sapi.dll itself: CoCreateInstance would come back here (TreatAs). */
 static HRESULT create_wine_voice(ISpVoice **out)
 {
@@ -1476,14 +1502,10 @@ static HRESULT create_wine_voice(ISpVoice **out)
 
     if (!get_class_object)
     {
-        HMODULE sapi = LoadLibraryW(L"sapi.dll");
+        HMODULE sapi = load_wine_sapi();
 
         if (sapi) get_class_object = (void *)GetProcAddress(sapi, "DllGetClassObject");
-        if (!get_class_object)
-        {
-            log_line("could not load Wine's sapi.dll");
-            return REGDB_E_CLASSNOTREG;
-        }
+        if (!get_class_object) return REGDB_E_CLASSNOTREG;
     }
     if (FAILED(hr = get_class_object(&CLSID_SpVoice, &IID_IClassFactory, (void **)&factory)))
         return hr;

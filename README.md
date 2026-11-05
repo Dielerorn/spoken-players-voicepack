@@ -55,8 +55,9 @@ To try one voice without installing anything: `engine\tools\Test-Voice.ps1 -Voic
 ## Linux (Wine, Proton)
 
 WoW run through Wine or Proton speaks with the same voicepack, installed in its Wine prefix, with
-SapiFix for what Wine's speech API lacks: [wine/README.md](wine/README.md). `wine/build.sh` builds
-`SpokenPlayersVoicepack-Wine.exe`, which sets it all up there, and the zip to hand out.
+SapiFix for what Wine's speech API lacks, and WoW told to use it: [wine/README.md](wine/README.md).
+`wine/build.sh` builds `SpokenPlayersVoicepack-Wine.exe`, which sets it all up there, and the zip to
+hand out.
 
 ## License
 
